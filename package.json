@@ -1,5 +1,5 @@
 {
-  "name": "sampleWP-00-workspace",
+  "name": "acf-acf-migrator",
   "private": true,
   "scripts": {
     "test": "cd dev && composer test",
@@ -7,7 +7,7 @@
     "test-pending": "cd dev && composer test-pending",
     "test-all": "cd dev && composer test-all",
 
-    
+
 		"devmode": "claude --mcp-config=./_doc/mcp/mcp-dev.json",
 		"devmode-c": "claude --mcp-config=./_doc/mcp/mcp-dev.json -c"
   }
