@@ -1,38 +1,124 @@
 <?php
 /**
- * Plugin Name: ACF Option -> Post Migration (Dry-run first)
- * Description: Copy ACF values from 'option' to a target post by field_key with nested tree report. Delete after use.
- * Version:     1.0
- * Author:      satokupo web system
- *
- * 使い方:
- *   1) 下の「=== SETTINGS (edit here) ===」の3変数だけを手動編集
- *   2) 管理者でログインして管理画面にアクセスするとJSONレポートが表示されます
- *   3) まず DRY_RUN を true（既定）で確認 → 問題なければ false にして本番コピー
- *   4) 実行後は本ファイルを削除
+ * Plugin Name: ACF Option → Post Migration
+ * Description: ACFフィールド値を移行する管理画面ツール。ドライラン機能付き。使用後は削除してください。
+ * Version:     2.0
+ * Author:      satokupo helper
+ * Requires PHP: 8.0
  */
 
-/* === SETTINGS (edit here) : 手動で書き換えるのはこの3つだけ ================== */
-$DRY_RUN        = true;                     // true=試走（書き込みなし） / false=本番（書き込み）
-$TARGET_POST_ID = 12345;                    // 移設先の投稿ID（固定/CPT）
-$GROUP_SELECTOR = 'all';                    // 'all' もしくは ['group_abcd1234','group_efgh5678']
-/* ============================================================================ */
+// 管理画面メニューの追加
+add_action('admin_menu', 'acf_migrator_add_menu');
 
-add_action('admin_init', function () use ($DRY_RUN, $TARGET_POST_ID, $GROUP_SELECTOR) {
-  // 実行ガード
-  if ( !is_user_logged_in() || !current_user_can('manage_options') ) {
-    return;
+function acf_migrator_add_menu() {
+  add_options_page(
+    'ACF Migrator',              // ページタイトル
+    'ACF Migrator',              // メニュータイトル
+    'manage_options',            // 権限
+    'acf-migrator',              // スラッグ
+    'acf_migrator_settings_page' // コールバック関数
+  );
+}
+
+/**
+ * 設定画面の表示
+ */
+function acf_migrator_settings_page() {
+  // 権限チェック
+  if (!current_user_can('manage_options')) {
+    wp_die('権限がありません');
   }
 
+  // フォーム送信処理
+  $report = null;
+  if (isset($_POST['acf_migrator_submit'])) {
+    check_admin_referer('acf_migrator_action', 'acf_migrator_nonce');
+
+    $source_post_id = sanitize_text_field($_POST['source_post_id']);
+    $target_post_id = intval($_POST['target_post_id']);
+    $group_selector = sanitize_text_field($_POST['group_selector']);
+    $dry_run = isset($_POST['dry_run']);
+
+    // 移行処理を実行
+    $report = acf_migrator_execute($source_post_id, $target_post_id, $group_selector, $dry_run);
+  }
+
+  // HTML出力
+  ?>
+  <div class="wrap">
+    <h1><span class="dashicons dashicons-admin-settings"></span> ACF Migrator</h1>
+    <p>ACFフィールド値を移行します。まずドライランで確認してから本番実行してください。</p>
+
+    <form method="post" action="">
+      <?php wp_nonce_field('acf_migrator_action', 'acf_migrator_nonce'); ?>
+
+      <table class="form-table">
+        <tr>
+          <th scope="row"><label for="source_post_id">移行元ID</label></th>
+          <td>
+            <input type="text" name="source_post_id" id="source_post_id"
+                   value="<?php echo esc_attr($_POST['source_post_id'] ?? 'option'); ?>"
+                   class="regular-text">
+            <p class="description">オプションページの場合は 'option'、投稿からの場合は投稿ID</p>
+          </td>
+        </tr>
+        <tr>
+          <th scope="row"><label for="target_post_id">移行先ID</label></th>
+          <td>
+            <input type="number" name="target_post_id" id="target_post_id"
+                   value="<?php echo esc_attr($_POST['target_post_id'] ?? ''); ?>"
+                   class="regular-text" required>
+            <p class="description">コピー先の投稿ID（必須）</p>
+          </td>
+        </tr>
+        <tr>
+          <th scope="row"><label for="group_selector">グループセレクター</label></th>
+          <td>
+            <input type="text" name="group_selector" id="group_selector"
+                   value="<?php echo esc_attr($_POST['group_selector'] ?? 'group_xxxxxxxxxx'); ?>"
+                   class="regular-text" required>
+            <p class="description">単一: 'group_xxx'、複数: ["group_xxx","group_yyy"]、全て: 'all'（必須）</p>
+          </td>
+        </tr>
+        <tr>
+          <th scope="row">ドライランモード</th>
+          <td>
+            <label>
+              <input type="checkbox" name="dry_run" value="1"
+                     <?php checked(!isset($_POST['acf_migrator_submit']) || isset($_POST['dry_run'])); ?>>
+              試走モード（書き込みなし、レポートのみ）
+            </label>
+          </td>
+        </tr>
+      </table>
+
+      <?php submit_button('移行を実行', 'primary', 'acf_migrator_submit'); ?>
+    </form>
+
+    <?php if ($report): ?>
+    <h2>実行レポート</h2>
+    <textarea readonly style="width:100%;height:500px;font-family:monospace;font-size:12px;"><?php
+      echo esc_textarea(json_encode($report, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT));
+    ?></textarea>
+    <?php endif; ?>
+  </div>
+  <?php
+}
+
+/**
+ * ACFフィールド値の移行処理を実行
+ */
+function acf_migrator_execute($source_post_id, $target_post_id, $group_selector, $dry_run) {
   // ACF存在チェック
-  if ( !function_exists('acf_get_field_groups') || !function_exists('acf_get_fields') ) {
-    return;
+  if (!function_exists('acf_get_field_groups') || !function_exists('acf_get_fields')) {
+    return ['error' => 'ACFが有効化されていません'];
   }
 
   // レポート器
   $report = [
-    'dry_run'        => $DRY_RUN,
-    'target_post_id' => $TARGET_POST_ID,
+    'dry_run'        => $dry_run,
+    'source_post_id' => $source_post_id,
+    'target_post_id' => $target_post_id,
     'timestamp'      => gmdate('c'),
     'groups'         => [],
     'totals'         => [
@@ -44,16 +130,12 @@ add_action('admin_init', function () use ($DRY_RUN, $TARGET_POST_ID, $GROUP_SELE
       'skipped'  => 0,
       'would_update' => 0,
     ],
-    'notes' => [
-      'selector' => is_array($GROUP_SELECTOR) ? 'ids' : (string)$GROUP_SELECTOR,
-      'hint'     => "Delete this plugin after use.",
-    ],
   ];
 
   // ターゲット投稿の存在確認（軽チェック）
-  if ( !$TARGET_POST_ID || get_post_status($TARGET_POST_ID) === false ) {
-    $report['error'] = "TARGET_POST_ID={$TARGET_POST_ID} is invalid or not found.";
-    output_json_and_exit($report);
+  if (!$target_post_id || get_post_status($target_post_id) === false) {
+    $report['error'] = "TARGET_POST_ID={$target_post_id} is invalid or not found.";
+    return $report;
   }
 
   // 対象グループの決定
@@ -61,18 +143,30 @@ add_action('admin_init', function () use ($DRY_RUN, $TARGET_POST_ID, $GROUP_SELE
   if (!is_array($groups)) $groups = [];
 
   $target_groups = [];
-  if ($GROUP_SELECTOR === 'all') {
+
+  // グループセレクターの解析（フェーズ5）
+  if ($group_selector === 'all') {
+    // 全グループを対象
     $target_groups = $groups;
-  } elseif (is_array($GROUP_SELECTOR)) {
-    $allowed = array_flip($GROUP_SELECTOR);
-    foreach ($groups as $g) {
-      if (!empty($g['key']) && isset($allowed[$g['key']])) {
-        $target_groups[] = $g;
+  } elseif (strpos($group_selector, '[') === 0) {
+    // JSON配列形式として解析を試みる（例: ["group_xxx","group_yyy"]）
+    $parsed = json_decode($group_selector, true);
+    if (is_array($parsed)) {
+      $allowed = array_flip($parsed);
+      foreach ($groups as $g) {
+        if (!empty($g['key']) && isset($allowed[$g['key']])) {
+          $target_groups[] = $g;
+        }
       }
     }
   } else {
-    // 想定外 → 空
-    $target_groups = [];
+    // 単一グループキー（例: "group_xxx"）
+    foreach ($groups as $g) {
+      if (!empty($g['key']) && $g['key'] === $group_selector) {
+        $target_groups[] = $g;
+        break;
+      }
+    }
   }
 
   $report['totals']['groups'] = count($target_groups);
@@ -96,14 +190,14 @@ add_action('admin_init', function () use ($DRY_RUN, $TARGET_POST_ID, $GROUP_SELE
 
     // 再帰列挙してツリー構築 & 値コピー/レポート
     foreach ($fields as $field) {
-      $group_node['tree'][] = enumerate_and_process_field($field, 'option', $TARGET_POST_ID, $DRY_RUN, $report['totals']);
+      $group_node['tree'][] = enumerate_and_process_field($field, $source_post_id, $target_post_id, $dry_run, $report['totals']);
     }
 
     $report['groups'][] = $group_node;
   }
 
-  output_json_and_exit($report);
-});
+  return $report;
+}
 
 /**
  * 再帰的にフィールド定義をたどり、各ノードで 'option' の値を調べ
@@ -254,13 +348,3 @@ function sample_array(array $a, $limit = 8) {
   return $out;
 }
 
-/**
- * JSON出力して即終了（管理画面での実行を想定）
- */
-function output_json_and_exit($payload) {
-  if (!headers_sent()) {
-    header('Content-Type: application/json; charset=utf-8');
-  }
-  echo json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
-  exit;
-}
